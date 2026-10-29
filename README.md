@@ -14,15 +14,6 @@ Basit, hızlı ve kullanıcı dostu arayüze sahip, Python (Tkinter) ve `pypdf` 
 ---
 
 
-## 🚀 Özellikler
-
-* **Sürükle-Bırak Tarzı Sıralama:** Listeye eklenen PDF dosyalarının sırasını "Yukarı" ve "Aşağı" butonlarıyla kolayca değiştirebilirsiniz.
-* **RAM Koruması / Boyut Sınırı:** Toplam dosya boyutu 500 MB'ı aşan durumlarda sistemi korumak için uyarı verir.
-* **Kolay Kullanım:** Python kurulumu gerektirmeyen (`.exe` sürümü ile) pratik masaüstü deneyimi.
-* **Şık ve Sade Arayüz:** Modern Tkinter tasarımı.
-
----
-
 ## 📥 İndir ve Kullan
 
 Uygulamanın en son kararlı sürümünü bilgisayarınıza indirerek doğrudan çalıştırabilirsiniz:
