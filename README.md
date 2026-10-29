@@ -13,15 +13,6 @@ Basit, hızlı ve kullanıcı dostu arayüze sahip, Python (Tkinter) ve `pypdf` 
 
 ---
 
-## 📥 İndir ve Kullan
-
-Uygulamanın en son kararlı sürümünü bilgisayarınıza indirerek doğrudan çalıştırabilirsiniz:
-
-1. [Releases Sayfası](https://github.com/mehmethamzaeryildiz/pdf-birlestirici/releases/tag/v1.0.0)
-
-Basit, hızlı ve kullanıcı dostu arayüze sahip, Python (Tkinter) ve `pypdf` kullanılarak geliştirilmiş masaüstü PDF birleştirme aracı.
-
----
 
 ## 🚀 Özellikler
 
