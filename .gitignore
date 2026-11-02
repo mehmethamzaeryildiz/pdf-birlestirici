@@ -2,3 +2,4 @@
 build/
 *.spec
 __pycache__/
+Output/
