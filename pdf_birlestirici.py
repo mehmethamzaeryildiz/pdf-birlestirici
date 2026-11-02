@@ -2,6 +2,10 @@ import os
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 import sv_ttk
+import pypdfium2 as pdfium
+import win32con
+import win32gui
+import win32print
 from pypdf import PdfReader, PdfWriter
 
 MAX_BOYUT_MB = 500  # Maksimum toplam dosya boyutu sınırı (RAM koruması)
@@ -53,6 +57,119 @@ def birlestir(dosyalar, kayit_yeri, sifre_sor):
     return True
 
 
+# ---------------- Yazdırma ----------------
+
+ONCELIKLI_KAGITLAR = ("A4", "A3", "A5", "Letter", "Legal")
+
+
+def yazicilar():
+    """(yazıcı adları, varsayılan yazıcı)"""
+    adlar = [p[2] for p in win32print.EnumPrinters(win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS)]
+    try:
+        varsayilan = win32print.GetDefaultPrinter()
+    except Exception:
+        varsayilan = adlar[0] if adlar else ""
+    return adlar, varsayilan
+
+
+def kagitlar(yazici):
+    """{kağıt adı: kağıt kodu}; yaygın boyutlar başta, kalanı sürücü sırasıyla."""
+    adlar = win32print.DeviceCapabilities(yazici, "", win32con.DC_PAPERNAMES)
+    idler = win32print.DeviceCapabilities(yazici, "", win32con.DC_PAPERS)
+    tumu = {a.strip("\0 "): i for a, i in zip(adlar, idler) if a.strip("\0 ")}
+    once = {a: tumu[a] for a in ONCELIKLI_KAGITLAR if a in tumu}
+    return {**once, **tumu}
+
+
+def yazici_ayarlari(yazici):
+    """Yazıcının mevcut DEVMODE'u (kağıt, kaset, çift taraf vb. sürücü ayarları)."""
+    h = win32print.OpenPrinter(yazici)
+    try:
+        dm = win32print.GetPrinter(h, 2)["pDevMode"]
+    finally:
+        win32print.ClosePrinter(h)
+    if dm is None:
+        raise RuntimeError(f"{yazici} yazıcısının ayarları okunamadı.")
+    return dm
+
+
+def yazici_ayar_penceresi(hwnd, yazici, dm):
+    """Sürücünün kendi ayar penceresini açar; Tamam denirse güncel DEVMODE, iptalde None."""
+    h = win32print.OpenPrinter(yazici)
+    try:
+        sonuc = win32print.DocumentProperties(
+            hwnd, h, yazici, dm, dm, win32con.DM_IN_PROMPT | win32con.DM_IN_BUFFER | win32con.DM_OUT_BUFFER)
+    finally:
+        win32print.ClosePrinter(h)
+    return dm if sonuc == win32con.IDOK else None
+
+
+def yazdir(dosyalar, yazici, kagit_kodu, yon, kopya, sifre_sor, dm=None, cikti=None, ilerleme=None):
+    """PDF'leri birleştirmeden, sırayla tek baskı işi olarak yazdırır.
+
+    yon: "oto" (her sayfa kendi şekline göre) | "dikey" | "yatay".
+    Sayfalar orantılı olarak kağıda sığdırılıp ortalanır; pdfium vektör olarak çizer.
+    cikti: "Microsoft Print to PDF" gibi dosyaya basan yazıcılar için çıktı yolu (testte kullanılır).
+    ilerleme(dosya_sirasi, yuzde): her sayfadan sonra çağrılır; yüzde tüm kopyalar dahildir.
+    Başarılıysa True, şifre sorusu iptal edildiyse False döner.
+    """
+    # Önce hepsini aç: şifre iptali ya da bozuk dosya yarım baskı işi bırakmasın
+    belgeler = []
+    try:
+        for dosya in dosyalar:
+            try:
+                sifre = None
+                reader = PdfReader(dosya)
+                if reader.is_encrypted and not reader.decrypt(""):
+                    sifre = sifre_sor(os.path.basename(dosya))
+                    if sifre is None:
+                        return False
+                    if not reader.decrypt(sifre):
+                        raise ValueError("Şifre yanlış.")
+                belgeler.append(pdfium.PdfDocument(dosya, password=sifre))
+            except Exception as e:
+                raise RuntimeError(f"{os.path.basename(dosya)}:\n{e}") from e
+
+        dm = dm or yazici_ayarlari(yazici)
+        dm.PaperSize = kagit_kodu
+        dm.Copies = 1  # kopyaları kendimiz döngüyle basarız: harmanlanmış (1-2-3, 1-2-3)
+        dm.Fields |= win32con.DM_PAPERSIZE | win32con.DM_ORIENTATION | win32con.DM_COPIES
+
+        hdc = win32gui.CreateDC("WINSPOOL", yazici, dm)
+        try:
+            win32print.StartDoc(hdc, ("PDF Birleştirici", cikti, None, 0))
+            basilan = [0] * len(belgeler)
+            for _ in range(kopya):
+                for sira, belge in enumerate(belgeler):
+                    for sayfa in belge:
+                        w, h = sayfa.get_size()  # sayfa döndürmesi dahil, point
+                        yatay = w > h if yon == "oto" else yon == "yatay"
+                        dm.Orientation = win32con.DMORIENT_LANDSCAPE if yatay else win32con.DMORIENT_PORTRAIT
+                        win32gui.ResetDC(hdc, dm)
+                        win32print.StartPage(hdc)
+                        pw = win32print.GetDeviceCaps(hdc, win32con.HORZRES)
+                        ph = win32print.GetDeviceCaps(hdc, win32con.VERTRES)
+                        olcek = min(pw / w, ph / h)
+                        dw, dh = int(w * olcek), int(h * olcek)
+                        pdfium.raw.FPDF_RenderPage(hdc, sayfa.raw, (pw - dw) // 2, (ph - dh) // 2, dw, dh, 0,
+                                                   pdfium.raw.FPDF_ANNOT | pdfium.raw.FPDF_PRINTING)
+                        sayfa.close()
+                        win32print.EndPage(hdc)
+                        basilan[sira] += 1
+                        if ilerleme:
+                            ilerleme(sira, basilan[sira] * 100 // (len(belge) * kopya))
+            win32print.EndDoc(hdc)
+        except Exception:
+            win32print.AbortDoc(hdc)
+            raise
+        finally:
+            win32gui.DeleteDC(hdc)
+        return True
+    finally:
+        for belge in belgeler:
+            belge.close()
+
+
 # ---------------- Arayüz ----------------
 
 secilen_dosyalar = []
@@ -82,16 +199,17 @@ def _baslangic_temasi():
         return "light"
 
 
-def _baslik_cubugu(tema):
+def _baslik_cubugu(tema, pencere=None):
     """Windows 10/11 başlık çubuğunu temaya uydurur; desteklenmiyorsa sessizce geçer."""
+    pencere = pencere or root
     try:
         import ctypes
-        hwnd = ctypes.windll.user32.GetParent(root.winfo_id())
+        hwnd = ctypes.windll.user32.GetParent(pencere.winfo_id())
         deger = ctypes.c_int(tema == "dark")
         ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(deger), ctypes.sizeof(deger))
         # Başlık çubuğunun hemen yeniden çizilmesi için
-        root.wm_attributes("-alpha", 0.99)
-        root.wm_attributes("-alpha", 1)
+        pencere.wm_attributes("-alpha", 0.99)
+        pencere.wm_attributes("-alpha", 1)
     except Exception:
         pass
 
@@ -130,10 +248,12 @@ def _yenile():
         toplam = sum(_mb(d) for d in secilen_dosyalar)
         durum.config(text=f"{n} dosya  ·  {toplam:.1f} MB")
         btn_birlestir.state(["!disabled"])
+        btn_yazdir.state(["!disabled"])
     else:
         bos_ipucu.place(relx=0.5, rely=0.5, anchor="center")
         durum.config(text="Henüz dosya eklenmedi")
         btn_birlestir.state(["disabled"])
+        btn_yazdir.state(["disabled"])
 
 
 def dosya_ekle():
@@ -145,7 +265,7 @@ def dosya_ekle():
         if dosya not in secilen_dosyalar:
             secilen_dosyalar.append(dosya)
             klasor = os.path.basename(os.path.dirname(dosya))
-            tablo.insert("", tk.END, values=(os.path.basename(dosya), klasor, f"{_mb(dosya):.1f} MB"))
+            tablo.insert("", tk.END, values=(os.path.basename(dosya), klasor, f"{_mb(dosya):.1f} MB", ""))
     _yenile()
 
 
@@ -216,6 +336,151 @@ def pdf_birlestir():
         root.config(cursor="")
 
 
+YESIL = "#16a34a"
+
+
+def _ilerleme_goster(sira, yuzde):
+    """Yazdırılan satırın 'Yazdırma' hücresinde yeşil çubuk; bitince satır yeşil zemin/beyaz yazı."""
+    iid = tablo.get_children()[sira]
+    tablo.set(iid, "yazdirma", f"{yuzde}%")
+    if yuzde >= 100:
+        ilerleme_cubugu.place_forget()
+        tablo.item(iid, tags=("bitti",))
+    else:
+        tablo.see(iid)
+        root.update_idletasks()  # see() sonrası bbox güncel olsun
+        kutu = tablo.bbox(iid, "yazdirma")
+        if kutu:
+            x, y, w, h = kutu
+            ilerleme_cubugu.place(in_=tablo, x=x, y=y, width=w, height=h)
+            ilerleme_cubugu.config(background=ttk.Style().lookup("Treeview", "background"))
+            ilerleme_cubugu.delete("all")
+            ilerleme_cubugu.create_rectangle(0, 0, w * yuzde / 100, h, fill=YESIL, width=0)
+            renk = "white" if yuzde >= 50 else ttk.Style().lookup("Treeview", "foreground")
+            ilerleme_cubugu.create_text(w / 2, h / 2, text=f"{yuzde}%", fill=renk)
+    # ponytail: baskı ana thread'de; çok uzun işlerde pencere "yanıt vermiyor" görünebilir -> o zaman thread'e taşı
+    root.update_idletasks()
+
+
+def _yazdirmayi_baslat(yazici, kagit_kodu, yon, kopya, dm):
+    for iid in tablo.get_children():
+        tablo.set(iid, "yazdirma", "")
+        tablo.item(iid, tags=())
+    tablo.selection_remove(tablo.selection())  # seçili satırın rengi yeşili örtmesin
+    root.config(cursor="watch")
+    try:
+        if yazdir(secilen_dosyalar, yazici, kagit_kodu, yon, kopya, _sifre_sor, dm=dm, ilerleme=_ilerleme_goster):
+            messagebox.showinfo("Yazdırıldı", f"{len(secilen_dosyalar)} dosya yazıcıya gönderildi:\n{yazici}")
+    except Exception as e:
+        messagebox.showerror("Hata", f"Yazdırılamadı:\n{e}")
+    finally:
+        ilerleme_cubugu.place_forget()
+        root.config(cursor="")
+
+
+def yazdir_penceresi():
+    if not secilen_dosyalar:
+        return
+    try:
+        adlar, varsayilan = yazicilar()
+    except Exception as e:
+        messagebox.showerror("Hata", f"Yazıcılar listelenemedi:\n{e}")
+        return
+    if not adlar:
+        messagebox.showwarning("Uyarı", "Bu bilgisayarda yüklü yazıcı bulunamadı.")
+        return
+
+    pen = tk.Toplevel(root)
+    pen.title("Yazdır")
+    pen.resizable(False, False)
+    pen.transient(root)
+    govde = ttk.Frame(pen, padding=20)
+    govde.pack(fill=tk.BOTH, expand=True)
+    govde.columnconfigure(1, weight=1)
+
+    ttk.Label(govde, text=f"{len(secilen_dosyalar)} dosya listedeki sırayla, birleştirilmeden yazdırılacak.",
+              foreground="gray").grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 12))
+
+    durum_ = {"dm": None, "kagitlar": {}}  # sürücü ayarları penceresinden gelen DEVMODE
+    yazici = tk.StringVar(value=varsayilan if varsayilan in adlar else adlar[0])
+    kagit = tk.StringVar()
+    yon = tk.StringVar(value="oto")
+    kopya = tk.IntVar(value=1)
+
+    ttk.Label(govde, text="Yazıcı").grid(row=1, column=0, sticky="w", pady=4)
+    cb_yazici = ttk.Combobox(govde, textvariable=yazici, values=adlar, state="readonly", width=34)
+    cb_yazici.grid(row=1, column=1, sticky="ew", pady=4)
+
+    ttk.Label(govde, text="Kağıt").grid(row=2, column=0, sticky="w", pady=4)
+    cb_kagit = ttk.Combobox(govde, textvariable=kagit, state="readonly", height=15)
+    cb_kagit.grid(row=2, column=1, sticky="ew", pady=4)
+
+    def kagidi_sec(kod):
+        ad = next((a for a, k in durum_["kagitlar"].items() if k == kod), None)
+        kagit.set(ad or ("A4" if "A4" in durum_["kagitlar"] else next(iter(durum_["kagitlar"]), "")))
+
+    def yazici_degisti(_=None):
+        try:
+            durum_["kagitlar"] = kagitlar(yazici.get())
+            durum_["dm"] = yazici_ayarlari(yazici.get())
+        except Exception as e:
+            durum_["kagitlar"], durum_["dm"] = {}, None
+            messagebox.showerror("Hata", f"Yazıcı bilgileri okunamadı:\n{e}", parent=pen)
+        cb_kagit.config(values=list(durum_["kagitlar"]))
+        kagidi_sec(durum_["dm"].PaperSize if durum_["dm"] else None)
+
+    def ayarlar():
+        if durum_["dm"] is None:
+            return
+        try:
+            dm = yazici_ayar_penceresi(int(pen.wm_frame(), 16), yazici.get(), durum_["dm"])
+        except Exception as e:
+            messagebox.showerror("Hata", f"Yazıcı ayarları açılamadı:\n{e}", parent=pen)
+            return
+        if dm is not None:
+            durum_["dm"] = dm
+            kagidi_sec(dm.PaperSize)
+
+    cb_yazici.bind("<<ComboboxSelected>>", yazici_degisti)
+    ttk.Button(govde, text="Ayarlar…", command=ayarlar).grid(row=1, column=2, padx=(8, 0), pady=4)
+
+    ttk.Label(govde, text="Yön").grid(row=3, column=0, sticky="w", pady=4)
+    yonler = ttk.Frame(govde)
+    yonler.grid(row=3, column=1, columnspan=2, sticky="w", pady=4)
+    for deger, metin in (("oto", "Otomatik"), ("dikey", "Dikey"), ("yatay", "Yatay")):
+        ttk.Radiobutton(yonler, text=metin, value=deger, variable=yon).pack(side=tk.LEFT, padx=(0, 12))
+    ttk.Label(govde, text="Otomatik: yatay sayfalar yatay, dikey sayfalar dikey basılır.",
+              foreground="gray").grid(row=4, column=1, columnspan=2, sticky="w")
+
+    ttk.Label(govde, text="Kopya").grid(row=5, column=0, sticky="w", pady=(10, 4))
+    ttk.Spinbox(govde, from_=1, to=99, textvariable=kopya, width=6).grid(row=5, column=1, sticky="w", pady=(10, 4))
+
+    def yazdir_tikla():
+        try:
+            adet = int(kopya.get())
+            if not 1 <= adet <= 99:
+                raise ValueError
+        except (ValueError, tk.TclError):
+            messagebox.showwarning("Uyarı", "Kopya sayısı 1 ile 99 arasında olmalı.", parent=pen)
+            return
+        if kagit.get() not in durum_["kagitlar"] or durum_["dm"] is None:
+            messagebox.showwarning("Uyarı", "Lütfen bir yazıcı ve kağıt seçin.", parent=pen)
+            return
+        ayarlar_ = (yazici.get(), durum_["kagitlar"][kagit.get()], yon.get(), adet)
+        pen.destroy()
+        _yazdirmayi_baslat(*ayarlar_, durum_["dm"])
+
+    butonlar = ttk.Frame(govde)
+    butonlar.grid(row=6, column=0, columnspan=3, sticky="e", pady=(16, 0))
+    ttk.Button(butonlar, text="İptal", command=pen.destroy).pack(side=tk.RIGHT, padx=(8, 0))
+    ttk.Button(butonlar, text="Yazdır", style="Accent.TButton", command=yazdir_tikla).pack(side=tk.RIGHT)
+
+    yazici_degisti()
+    pen.bind("<Escape>", lambda e: pen.destroy())
+    pen.grab_set()
+    pen.after(50, lambda: _baslik_cubugu(sv_ttk.get_theme(), pen))
+
+
 if __name__ == "__main__":
     root = tk.Tk()
     root.title("PDF Birleştirici")
@@ -235,7 +500,7 @@ if __name__ == "__main__":
     tema_butonu = ttk.Button(ana, style="Toolbutton", command=tema_degistir)
     tema_butonu.grid(row=0, column=1, sticky="ne")
     ttk.Label(ust, text="PDF Birleştirici", font=("Segoe UI Semibold", 18)).pack(anchor="w")
-    ttk.Label(ust, text="Dosyaları ekleyin, sıralayın ve tek bir PDF olarak kaydedin.",
+    ttk.Label(ust, text="Dosyaları ekleyin, sıralayın; tek PDF olarak kaydedin ya da sırayla yazdırın.",
               foreground="gray").pack(anchor="w")
 
     # Dosya tablosu
@@ -244,12 +509,16 @@ if __name__ == "__main__":
     frame_liste.rowconfigure(0, weight=1)
     frame_liste.columnconfigure(0, weight=1)
 
-    tablo = ttk.Treeview(frame_liste, columns=("dosya", "klasor", "boyut"), show="headings", selectmode="browse")
-    for kolon, baslik, genislik, hiza in (("dosya", "Dosya", 300, "w"),
-                                          ("klasor", "Klasör", 170, "w"),
-                                          ("boyut", "Boyut", 80, "e")):
+    tablo = ttk.Treeview(frame_liste, columns=("dosya", "klasor", "boyut", "yazdirma"), show="headings",
+                         selectmode="browse")
+    for kolon, baslik, genislik, hiza in (("dosya", "Dosya", 280, "w"),
+                                          ("klasor", "Klasör", 150, "w"),
+                                          ("boyut", "Boyut", 80, "e"),
+                                          ("yazdirma", "Yazdırma", 90, "center")):
         tablo.heading(kolon, text=baslik, anchor=hiza)
-        tablo.column(kolon, width=genislik, anchor=hiza, stretch=kolon != "boyut")
+        tablo.column(kolon, width=genislik, anchor=hiza, stretch=kolon not in ("boyut", "yazdirma"))
+    tablo.tag_configure("bitti", background=YESIL, foreground="white")
+    ilerleme_cubugu = tk.Canvas(frame_liste, highlightthickness=0, borderwidth=0)
     tablo.grid(row=0, column=0, sticky="nsew")
     kaydir = ttk.Scrollbar(frame_liste, orient=tk.VERTICAL, command=tablo.yview)
     kaydir.grid(row=0, column=1, sticky="ns")
@@ -281,6 +550,8 @@ if __name__ == "__main__":
     durum.pack(side=tk.LEFT)
     btn_birlestir = ttk.Button(alt, text="Birleştir ve Kaydet", style="Accent.TButton", command=pdf_birlestir)
     btn_birlestir.pack(side=tk.RIGHT, ipadx=12, ipady=2)
+    btn_yazdir = ttk.Button(alt, text="🖨  Yazdır…", command=yazdir_penceresi)
+    btn_yazdir.pack(side=tk.RIGHT, padx=(0, 8), ipadx=8, ipady=2)
 
     tema = _baslangic_temasi()
     _tema_uygula(tema)
