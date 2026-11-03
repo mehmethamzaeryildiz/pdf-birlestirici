@@ -26,7 +26,7 @@ Uygulamanın en son kararlı sürümünü bilgisayarınıza indirerek doğrudan 
 
 > **"Windows kişisel bilgisayarınızı korudu" uyarısı çıkarsa:** Uygulama dijital olarak imzalanmadığı için Windows SmartScreen bu uyarıyı gösterir. **"Ek bilgi" → "Yine de çalıştır"** diyerek kuruluma devam edebilirsiniz.
 >
-> Kaldırmak için: Ayarlar → Uygulamalar → PDF Birleştirici → Kaldır.
+> Kaldırmak için: Ayarlar → Uygulamalar → PDF Birleştirici → Kaldır (veya Denetim Masası → Programlar ve Özellikler).
 
 ---
 
@@ -47,7 +47,7 @@ Test: `python test_birlestir.py` (çıktı `OK` olmalı)
 
 ```bash
 pip install pyinstaller
-python -m PyInstaller --noconfirm --onedir --windowed --name PDF_Birlestirici pdf_birlestirici.py
+python -m PyInstaller --noconfirm --onedir --windowed --icon pdf_birlestirici.ico --name PDF_Birlestirici pdf_birlestirici.py
 "%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe" setup.iss
 ```
 
