@@ -1,7 +1,7 @@
 import os
 import tempfile
 from pypdf import PdfReader, PdfWriter
-from pdf_birlestirici import birlestir, kagitlar, yazdir, yazicilar
+from pdf_birlestirici import ayir, birlestir, kagitlar, yazdir, yazicilar
 
 
 def pdf_yap(yol, sayfa, sifre=None, boyut=(100, 100)):
@@ -43,6 +43,49 @@ with tempfile.TemporaryDirectory() as d:
 
     # Eksik dosya: anlaşılır hata
     assert "yok.pdf" in hata_bekle(ValueError, lambda: birlestir([os.path.join(d, "yok.pdf")], out, lambda ad: None))
+
+    # ---- Ayırma ----
+    def sayfalar(yollar):
+        return [len(PdfReader(y).pages) for y in yollar]
+
+    on = os.path.join(d, "on.pdf")
+    w = PdfWriter()
+    for _ in range(10):
+        w.add_blank_page(100, 100)
+    w.add_outline_item("Giriş", 0)
+    w.add_outline_item("Bölüm: 2", 4)  # ':' dosya adında '_' olur
+    w.write(on)
+    parca = os.path.join(d, "parca")
+    sor = lambda ad: None
+
+    y = ayir(on, "aralik", "1-3, 5", parca, sor)
+    assert [os.path.basename(p) for p in y] == ["on_s1-3.pdf", "on_s5.pdf"] and sayfalar(y) == [3, 1]
+    assert sayfalar(ayir(on, "tek", None, parca, sor)) == [1] * 10
+    assert sayfalar(ayir(on, "n", 4, parca, sor)) == [4, 4, 2]
+    assert sayfalar(ayir(on, "sec", "2, 7, 9-10", parca, sor)) == [4]
+
+    y = ayir(on, "yerimi", None, parca, sor)
+    assert [os.path.basename(p) for p in y] == ["on_01_Giriş.pdf", "on_02_Bölüm_ 2.pdf"] and sayfalar(y) == [4, 6]
+    assert "yer imi" in hata_bekle(ValueError, lambda: ayir(a, "yerimi", None, parca, sor))
+
+    # Boyut: limit = 3 sayfalık parçanın boyutu -> 3,3,3,1 ve hiçbiri limiti aşmaz
+    from pdf_birlestirici import _pdf_boyutu
+    limit = _pdf_boyutu(PdfReader(on), [0, 1, 2])
+    y = ayir(on, "boyut", limit / (1024 * 1024), parca, sor)
+    assert sayfalar(y) == [3, 3, 3, 1] and all(os.path.getsize(p) <= limit for p in y)
+    assert sayfalar(ayir(on, "boyut", 1e-6, parca, sor)) == [1] * 10  # sayfa limitten büyükse tek başına
+
+    for hatali in ("0-3", "5-2", "abc", "11", " , "):
+        hata_bekle(ValueError, lambda: ayir(on, "aralik", hatali, parca, sor))
+
+    # Şifreli: şifre sorulur; iptal -> None
+    assert sayfalar(ayir(c, "tek", None, parca, lambda ad: "gizli")) == [1, 1, 1]
+    assert ayir(c, "tek", None, parca, lambda ad: None) is None
+
+    # Mevcut dosya: sorulur, hayır denirse dokunulmaz
+    sorulan = []
+    assert ayir(on, "n", 4, parca, sor, uzerine_yaz_sor=lambda m: sorulan.append(m) or False) is None
+    assert len(sorulan[0]) == 3
 
     # Yazdırma: Windows'un "Microsoft Print to PDF" yazıcısına dosya olarak basılır
     PDF_YAZICI = "Microsoft Print to PDF"

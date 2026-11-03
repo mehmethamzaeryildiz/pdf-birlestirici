@@ -7,7 +7,8 @@ Basit, hızlı ve kullanıcı dostu arayüze sahip, Python (Tkinter) ve `pypdf` 
 ## Özellikler
 
 * **Kolay Sıralama:** Listeye eklenen PDF dosyalarının sırasını "Yukarı" ve "Aşağı" butonlarıyla değiştirebilirsiniz.
-* **Şifreli PDF Desteği:** Şifreli dosyalar için birleştirme sırasında şifre sorulur.
+* **PDF Ayırma:** Listede seçili PDF'i parçalara ayırır. Seçenekler: sayfa aralıkları (`1-5, 6-10`), her sayfayı ayrı dosya, her N sayfada bir, belirli sayfaları çıkarma (`2, 7, 9-12`), boyuta göre (ör. en fazla 10 MB) ve yer imlerine (bookmark) göre.
+* **Şifreli PDF Desteği:** Şifreli dosyalar için birleştirme, yazdırma ve ayırma sırasında şifre sorulur.
 * **Güvenli Kayıt:** Çıktı, birleştirilen dosyalardan birinin üzerine yazılamaz; hata olursa hangi dosyada olduğu gösterilir.
 * **RAM Koruması / Boyut Sınırı:** Toplam dosya boyutu 500 MB'ı aşan durumlarda sistemi korumak için uyarı verir.
 * **Kolay Kullanım:** Python kurulumu gerektirmeyen (`.exe` sürümü ile) pratik masaüstü deneyimi.

@@ -1,4 +1,6 @@
+import io
 import os
+import re
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 import sv_ttk
@@ -55,6 +57,128 @@ def birlestir(dosyalar, kayit_yeri, sifre_sor):
         with open(kayit_yeri, "wb") as cikis_dosyasi:
             merger.write(cikis_dosyasi)
     return True
+
+
+# ---------------- Ayırma ----------------
+
+def sayfa_araliklari(metin, sayfa_sayisi):
+    """'1-5, 8, 10-12' -> [(0, 4), (7, 7), (9, 11)]  (0 tabanlı, uçlar dahil)."""
+    araliklar = []
+    for parca in metin.replace(";", ",").split(","):
+        parca = parca.strip()
+        if not parca:
+            continue
+        bas, _, son = parca.partition("-")
+        try:
+            bas, son = int(bas), int(son or bas)
+        except ValueError:
+            raise ValueError(f"Geçersiz sayfa ifadesi: '{parca}'\nÖrnek: 1-5, 8, 10-12")
+        if not 1 <= bas <= son <= sayfa_sayisi:
+            raise ValueError(f"'{parca}' geçersiz.\nSayfalar 1 ile {sayfa_sayisi} arasında olmalı, "
+                             f"aralık küçükten büyüğe yazılmalı.")
+        araliklar.append((bas - 1, son - 1))
+    if not araliklar:
+        raise ValueError("Lütfen en az bir sayfa ya da aralık girin.\nÖrnek: 1-5, 8, 10-12")
+    return araliklar
+
+
+def _guvenli_ad(metin):
+    return re.sub(r'[\\/:*?"<>|\r\n\t]', "_", metin).strip(" .")[:60] or "bolum"
+
+
+def _pdf_boyutu(reader, sayfalar):
+    with PdfWriter() as w:
+        for i in sayfalar:
+            w.add_page(reader.pages[i])
+        tampon = io.BytesIO()
+        w.write(tampon)
+        return tampon.tell()
+
+
+def _parcalar(reader, mod, deger, ad):
+    """[(dosya adı, sayfa indeksleri)]"""
+    n = len(reader.pages)
+    if mod == "aralik":
+        return [(f"{ad}_s{b + 1}" + (f"-{s + 1}" if s > b else ""), range(b, s + 1))
+                for b, s in sayfa_araliklari(deger, n)]
+    if mod in ("tek", "n"):
+        adim = 1 if mod == "tek" else deger
+        return [(f"{ad}_{i // adim + 1}", range(i, min(i + adim, n))) for i in range(0, n, adim)]
+    if mod == "sec":
+        return [(f"{ad}_secilen", [i for b, s in sayfa_araliklari(deger, n) for i in range(b, s + 1)])]
+    if mod == "boyut":
+        # ponytail: her sayfa eklenince parça baştan yazılıp ölçülür (O(n²)); paylaşılan font/resimler
+        # yüzünden sayfa boyutları toplanamaz. Çok büyük belgede yavaşlarsa ikili aramaya geç.
+        limit = deger * 1024 * 1024
+        gruplar, grup = [], []
+        for i in range(n):
+            if grup and _pdf_boyutu(reader, grup + [i]) > limit:
+                gruplar.append(grup)
+                grup = []
+            grup.append(i)
+        gruplar.append(grup)
+        return [(f"{ad}_{k + 1}", g) for k, g in enumerate(gruplar)]
+    if mod == "yerimi":
+        baslar = []
+        for oge in reader.outline:
+            if isinstance(oge, list):  # alt seviye yer imleri
+                continue
+            try:
+                sayfa = reader.get_destination_page_number(oge)
+            except Exception:
+                continue
+            if sayfa is not None and sayfa >= 0:
+                baslar.append((sayfa, oge.title or ""))
+        if not baslar:
+            raise ValueError("Bu PDF'te yer imi (bookmark) bulunmuyor.\nBaşka bir ayırma yöntemi seçin.")
+        baslar.sort(key=lambda b: b[0])
+        parcalar = []
+        for k, (sayfa, baslik) in enumerate(baslar):
+            bas = 0 if k == 0 else sayfa  # ilk yer iminden önceki sayfalar ilk parçaya
+            son = baslar[k + 1][0] if k + 1 < len(baslar) else n
+            if son > bas:  # aynı sayfadaki yer imlerinden sonuncusu kalır
+                parcalar.append((f"{ad}_{len(parcalar) + 1:02d}_{_guvenli_ad(baslik)}", range(bas, son)))
+        return parcalar
+    raise ValueError(f"Bilinmeyen ayırma modu: {mod}")
+
+
+def ayir(dosya, mod, deger, klasor, sifre_sor, uzerine_yaz_sor=lambda yollar: True):
+    """PDF'i parçalara ayırıp klasor'e yazar.
+
+    mod: aralik ("1-5, 6-10"), tek, n (sayfa sayısı), sec ("2, 7, 9-12"), boyut (MB), yerimi.
+    uzerine_yaz_sor(mevcut_yollar) -> bool; zaten var olan dosyalar için.
+    Yazılan dosya yollarını, şifre ya da üzerine yazma sorusu iptal edildiyse None döner.
+    """
+    if _mb(dosya) > MAX_BOYUT_MB:
+        raise ValueError(f"Dosya {MAX_BOYUT_MB} MB sınırını aşıyor.")
+    try:
+        reader = PdfReader(dosya)
+        if reader.is_encrypted and not reader.decrypt(""):
+            sifre = sifre_sor(os.path.basename(dosya))
+            if sifre is None:
+                return None
+            if not reader.decrypt(sifre):
+                raise ValueError("Şifre yanlış.")
+    except Exception as e:
+        raise RuntimeError(f"{os.path.basename(dosya)}:\n{e}") from e
+
+    ad = os.path.splitext(os.path.basename(dosya))[0]
+    parcalar = [(os.path.join(klasor, f"{isim}.pdf"), sayfalar)
+                for isim, sayfalar in _parcalar(reader, mod, deger, ad)]
+    yollar = [y for y, _ in parcalar]
+    if _norm(dosya) in {_norm(y) for y in yollar}:
+        raise ValueError("Parçalardan biri ayrılan dosyanın üzerine yazılacaktı.\nFarklı bir klasör seçin.")
+    mevcut = [y for y in yollar if os.path.exists(y)]
+    if mevcut and not uzerine_yaz_sor(mevcut):
+        return None
+
+    os.makedirs(klasor, exist_ok=True)
+    for yol, sayfalar in parcalar:
+        with PdfWriter() as w:
+            for i in sayfalar:
+                w.add_page(reader.pages[i])
+            w.write(yol)
+    return yollar
 
 
 # ---------------- Yazdırma ----------------
@@ -249,7 +373,9 @@ def _yenile():
         durum.config(text=f"{n} dosya  ·  {toplam:.1f} MB")
         btn_birlestir.state(["!disabled"])
         btn_yazdir.state(["!disabled"])
+        btn_ayir.state(["!disabled"] if tablo.selection() else ["disabled"])
     else:
+        btn_ayir.state(["disabled"])
         bos_ipucu.place(relx=0.5, rely=0.5, anchor="center")
         durum.config(text="Henüz dosya eklenmedi")
         btn_birlestir.state(["disabled"])
@@ -481,6 +607,108 @@ def yazdir_penceresi():
     pen.after(50, lambda: _baslik_cubugu(sv_ttk.get_theme(), pen))
 
 
+def ayir_penceresi():
+    secili = tablo.selection()
+    if not secili:
+        return
+    dosya = secilen_dosyalar[tablo.index(secili[0])]
+    try:
+        r = PdfReader(dosya)
+        bilgi = f"{len(r.pages)} sayfa" if not r.is_encrypted or r.decrypt("") else "şifreli"
+    except Exception:
+        bilgi = "okunamadı"
+
+    pen = tk.Toplevel(root)
+    pen.title("Ayır")
+    pen.resizable(False, False)
+    pen.transient(root)
+    govde = ttk.Frame(pen, padding=20)
+    govde.pack(fill=tk.BOTH, expand=True)
+    govde.columnconfigure(1, weight=1)
+
+    ttk.Label(govde, text=f"{os.path.basename(dosya)}  ·  {bilgi}",
+              font=("Segoe UI Semibold", 11)).grid(row=0, column=0, columnspan=3, sticky="w")
+    ttk.Label(govde, text="Parçalar seçeceğiniz klasöre ayrı PDF dosyaları olarak kaydedilir.",
+              foreground="gray").grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 12))
+
+    mod = tk.StringVar(value="aralik")
+    aralik, sec = tk.StringVar(value="1-5, 6-10"), tk.StringVar(value="1, 3")
+    n, mb = tk.StringVar(value="2"), tk.StringVar(value="10")
+    girdiler = {
+        "aralik": (ttk.Entry(govde, textvariable=aralik, width=24), "Her aralık ayrı dosya"),
+        "tek": (None, "Her sayfa ayrı dosya"),
+        "n": (ttk.Spinbox(govde, from_=1, to=9999, textvariable=n, width=8), "sayfa"),
+        "sec": (ttk.Entry(govde, textvariable=sec, width=24), "Hepsi tek dosyada"),
+        "boyut": (ttk.Spinbox(govde, from_=1, to=500, textvariable=mb, width=8), "MB (en fazla)"),
+        "yerimi": (None, "Her bölüm ayrı dosya"),
+    }
+    basliklar = {"aralik": "Sayfa aralıkları", "tek": "Her sayfayı ayır", "n": "Her N sayfada bir",
+                 "sec": "Belirli sayfaları çıkar", "boyut": "Boyuta göre", "yerimi": "Yer imlerine göre"}
+
+    def mod_degisti():
+        for m, (girdi, _) in girdiler.items():
+            if girdi:
+                girdi.state(["!disabled"] if m == mod.get() else ["disabled"])
+
+    for satir, (m, (girdi, ipucu)) in enumerate(girdiler.items(), start=2):
+        ttk.Radiobutton(govde, text=basliklar[m], value=m, variable=mod, command=mod_degisti).grid(
+            row=satir, column=0, sticky="w", pady=4, padx=(0, 16))
+        if girdi:
+            girdi.grid(row=satir, column=1, sticky="w", pady=4)
+        ttk.Label(govde, text=ipucu, foreground="gray").grid(
+            row=satir, column=2 if girdi else 1, columnspan=1 if girdi else 2, sticky="w", padx=(8, 0))
+
+    def ayir_tikla():
+        m = mod.get()
+        try:
+            deger = {"aralik": aralik.get, "sec": sec.get,
+                     "n": lambda: int(n.get()),
+                     "boyut": lambda: float(mb.get().replace(",", "."))}.get(m, lambda: None)()
+            if m in ("n", "boyut") and not deger > 0:
+                raise ValueError
+        except ValueError:
+            messagebox.showwarning("Uyarı", "Lütfen 0'dan büyük bir sayı girin.", parent=pen)
+            return
+        klasor = filedialog.askdirectory(title="Parçaların Kaydedileceği Klasör",
+                                         initialdir=os.path.dirname(dosya), parent=pen)
+        if not klasor:
+            return
+
+        def uzerine_yaz_sor(mevcut):
+            ornek = "\n".join(os.path.basename(y) for y in mevcut[:5]) + ("\n…" if len(mevcut) > 5 else "")
+            return messagebox.askyesno("Dosyalar Var", f"{len(mevcut)} dosya zaten var:\n{ornek}\n\n"
+                                                       "Üzerine yazılsın mı?", parent=pen)
+
+        pen.config(cursor="watch")
+        pen.update_idletasks()
+        try:
+            yollar = ayir(dosya, m, deger, klasor, _sifre_sor, uzerine_yaz_sor)
+        except Exception as e:
+            messagebox.showerror("Hata", f"Ayrılamadı:\n{e}", parent=pen)  # pencere açık kalır, düzeltip tekrar denenir
+            return
+        finally:
+            pen.config(cursor="")
+        if yollar is None:
+            return
+        mesaj = f"{len(yollar)} dosya oluşturuldu:\n{klasor}"
+        if m == "boyut":
+            buyuk = sum(_mb(y) > deger for y in yollar)
+            if buyuk:
+                mesaj += f"\n\nUyarı: {buyuk} parça tek sayfası {deger:g} MB'tan büyük olduğu için sınırı aşıyor."
+        pen.destroy()
+        messagebox.showinfo("Başarılı!", mesaj)
+
+    butonlar = ttk.Frame(govde)
+    butonlar.grid(row=len(girdiler) + 2, column=0, columnspan=3, sticky="e", pady=(16, 0))
+    ttk.Button(butonlar, text="İptal", command=pen.destroy).pack(side=tk.RIGHT, padx=(8, 0))
+    ttk.Button(butonlar, text="Ayır", style="Accent.TButton", command=ayir_tikla).pack(side=tk.RIGHT)
+
+    mod_degisti()
+    pen.bind("<Escape>", lambda e: pen.destroy())
+    pen.grab_set()
+    pen.after(50, lambda: _baslik_cubugu(sv_ttk.get_theme(), pen))
+
+
 if __name__ == "__main__":
     root = tk.Tk()
     root.title("PDF Birleştirici")
@@ -500,7 +728,7 @@ if __name__ == "__main__":
     tema_butonu = ttk.Button(ana, style="Toolbutton", command=tema_degistir)
     tema_butonu.grid(row=0, column=1, sticky="ne")
     ttk.Label(ust, text="PDF Birleştirici", font=("Segoe UI Semibold", 18)).pack(anchor="w")
-    ttk.Label(ust, text="Dosyaları ekleyin, sıralayın; tek PDF olarak kaydedin ya da sırayla yazdırın.",
+    ttk.Label(ust, text="Dosyaları ekleyin, sıralayın; tek PDF olarak kaydedin, sırayla yazdırın ya da parçalara ayırın.",
               foreground="gray").pack(anchor="w")
 
     # Dosya tablosu
@@ -524,6 +752,7 @@ if __name__ == "__main__":
     kaydir.grid(row=0, column=1, sticky="ns")
     tablo.config(yscrollcommand=kaydir.set)
     tablo.bind("<Delete>", lambda e: secileni_sil())
+    tablo.bind("<<TreeviewSelect>>", lambda e: _yenile())
 
     bos_ipucu = ttk.Label(frame_liste, text="Henüz PDF eklenmedi\n\"PDF Ekle\" ile başlayın",
                           justify="center", foreground="gray")
@@ -552,6 +781,8 @@ if __name__ == "__main__":
     btn_birlestir.pack(side=tk.RIGHT, ipadx=12, ipady=2)
     btn_yazdir = ttk.Button(alt, text="🖨  Yazdır…", command=yazdir_penceresi)
     btn_yazdir.pack(side=tk.RIGHT, padx=(0, 8), ipadx=8, ipady=2)
+    btn_ayir = ttk.Button(alt, text="✂  Ayır…", command=ayir_penceresi)
+    btn_ayir.pack(side=tk.RIGHT, padx=(0, 8), ipadx=8, ipady=2)
 
     tema = _baslangic_temasi()
     _tema_uygula(tema)
