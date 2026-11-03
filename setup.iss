@@ -1,4 +1,4 @@
-; Inno Setup betiği. Önce: python -m PyInstaller --noconfirm --onedir --windowed --name PDF_Birlestirici pdf_birlestirici.py
+; Inno Setup betiği. Önce: python -m PyInstaller --noconfirm --onedir --windowed --icon pdf_birlestirici.ico --name PDF_Birlestirici pdf_birlestirici.py
 ; Sonra: ISCC.exe setup.iss  ->  Output\PDF_Birlestirici_Setup.exe
 
 #define AppVersion "1.3.0"
@@ -19,6 +19,7 @@ Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
 UninstallDisplayIcon={app}\PDF_Birlestirici.exe
+SetupIconFile=pdf_birlestirici.ico
 
 [Languages]
 Name: "turkish"; MessagesFile: "compiler:Languages\Turkish.isl"
