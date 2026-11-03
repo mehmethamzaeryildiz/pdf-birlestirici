@@ -1,7 +1,7 @@
 ; Inno Setup betiği. Önce: python -m PyInstaller --noconfirm --onedir --windowed --icon pdf_birlestirici.ico --name PDF_Birlestirici pdf_birlestirici.py
 ; Sonra: ISCC.exe setup.iss  ->  Output\PDF_Birlestirici_Setup.exe
 
-#define AppVersion "1.3.0"
+#define AppVersion "1.3.1"
 
 [Setup]
 AppId={{8E3F2A71-5C4B-4D2E-9A6F-1B7C3D9E0F42}
