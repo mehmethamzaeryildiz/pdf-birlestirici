@@ -1,0 +1,48 @@
+name: macOS ve Linux derleme
+
+on:
+  release:
+    types: [published]  # web arayüzünden yayınlanan sürüme dosyalar eklenir
+  workflow_dispatch:     # Actions sekmesinden elle çalıştırma (dosyalar "Artifacts" altında)
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest       # Apple Silicon (M1/M2/M3…)
+            paket: PDF_Birlestirici-macOS-AppleSilicon.zip
+          - os: macos-15-intel     # Intel işlemcili Mac'ler
+            paket: PDF_Birlestirici-macOS-Intel.zip
+          - os: ubuntu-latest
+            paket: PDF_Birlestirici-Linux.tar.gz
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install -r requirements.txt pyinstaller pillow
+      - run: python test_birlestir.py
+      - run: python -m PyInstaller --noconfirm --onedir --windowed --icon pdf_birlestirici.ico --name "PDF Birlestirici" pdf_birlestirici.py
+
+      - name: Paketle (macOS)
+        if: runner.os == 'macOS'
+        run: ditto -c -k --keepParent "dist/PDF Birlestirici.app" "${{ matrix.paket }}"
+      - name: Paketle (Linux)
+        if: runner.os == 'Linux'
+        run: tar -czf "${{ matrix.paket }}" -C dist "PDF Birlestirici"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.paket }}
+          path: ${{ matrix.paket }}
+      - name: Sürüme ekle
+        if: github.event_name == 'release'
+        run: gh release upload "${{ github.event.release.tag_name }}" "${{ matrix.paket }}" --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}

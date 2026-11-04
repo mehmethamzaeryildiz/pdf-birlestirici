@@ -87,6 +87,24 @@ with tempfile.TemporaryDirectory() as d:
     assert ayir(on, "n", 4, parca, sor, uzerine_yaz_sor=lambda m: sorulan.append(m) or False) is None
     assert len(sorulan[0]) == 3
 
+    # macOS/Linux baskı PDF'i (saf pypdf, her platformda test edilir)
+    from pdf_birlestirici import _belgeleri_ac, _yazdir_lp
+    dk, yt = os.path.join(d, "dk.pdf"), os.path.join(d, "yt.pdf")
+    pdf_yap(dk, 1, boyut=(300, 500))
+    pdf_yap(yt, 2, boyut=(842, 595), sifre="gizli")
+
+    def lp_basilan(kagit, yon):
+        yol = os.path.join(d, f"lp_{kagit}_{yon}.pdf")
+        olay = []
+        _yazdir_lp(_belgeleri_ac([dk, yt], lambda ad: "gizli"), "x", kagit, yon, 1, yol, lambda i, y: olay.append((i, y)))
+        assert olay == [(0, 100), (1, 50), (1, 100)], olay
+        return [(round(float(p.mediabox.width)), round(float(p.mediabox.height))) for p in PdfReader(yol).pages]
+
+    assert lp_basilan("A4", "oto") == [(595, 842), (842, 595), (842, 595)]
+    assert lp_basilan("A4", "dikey") == [(595, 842)] * 3
+    assert lp_basilan("A5", "yatay") == [(595, 420)] * 3
+    assert _belgeleri_ac([yt], lambda ad: None) is None
+
     # Yazdırma: Windows'un "Microsoft Print to PDF" yazıcısına dosya olarak basılır
     PDF_YAZICI = "Microsoft Print to PDF"
     if PDF_YAZICI in yazicilar()[0]:

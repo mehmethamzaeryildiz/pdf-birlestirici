@@ -1,14 +1,21 @@
 import io
 import os
 import re
+import subprocess
+import sys
+import tempfile
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
+from types import SimpleNamespace
 import sv_ttk
 import pypdfium2 as pdfium
-import win32con
-import win32gui
-import win32print
-from pypdf import PdfReader, PdfWriter
+from pypdf import PdfReader, PdfWriter, Transformation
+
+WINDOWS = sys.platform == "win32"
+if WINDOWS:
+    import win32con
+    import win32gui
+    import win32print
 
 MAX_BOYUT_MB = 500  # Maksimum toplam dosya boyutu sınırı (RAM koruması)
 
@@ -228,32 +235,51 @@ def yazici_ayar_penceresi(hwnd, yazici, dm):
     return dm if sonuc == win32con.IDOK else None
 
 
+def _belgeleri_ac(dosyalar, sifre_sor):
+    """[(yol, şifre, reader)]; şifre sorusu iptal edilirse None."""
+    acik = []
+    for dosya in dosyalar:
+        try:
+            sifre = None
+            reader = PdfReader(dosya)
+            if reader.is_encrypted and not reader.decrypt(""):
+                sifre = sifre_sor(os.path.basename(dosya))
+                if sifre is None:
+                    return None
+                if not reader.decrypt(sifre):
+                    raise ValueError("Şifre yanlış.")
+            acik.append((dosya, sifre, reader))
+        except Exception as e:
+            raise RuntimeError(f"{os.path.basename(dosya)}:\n{e}") from e
+    return acik
+
+
 def yazdir(dosyalar, yazici, kagit_kodu, yon, kopya, sifre_sor, dm=None, cikti=None, ilerleme=None):
     """PDF'leri birleştirmeden, sırayla tek baskı işi olarak yazdırır.
 
     yon: "oto" (her sayfa kendi şekline göre) | "dikey" | "yatay".
-    Sayfalar orantılı olarak kağıda sığdırılıp ortalanır; pdfium vektör olarak çizer.
-    cikti: "Microsoft Print to PDF" gibi dosyaya basan yazıcılar için çıktı yolu (testte kullanılır).
+    Sayfalar orantılı olarak kağıda sığdırılıp ortalanır (vektör olarak).
+    cikti: baskı yerine dosyaya yazılacak yol (testte kullanılır). Windows'ta "Microsoft Print to PDF" gibi
+    dosyaya basan yazıcılar içindir; macOS/Linux'ta yazıcıya gönderilecek PDF buraya kaydedilir.
     ilerleme(dosya_sirasi, yuzde): her sayfadan sonra çağrılır; yüzde tüm kopyalar dahildir.
     Başarılıysa True, şifre sorusu iptal edildiyse False döner.
     """
     # Önce hepsini aç: şifre iptali ya da bozuk dosya yarım baskı işi bırakmasın
+    acik = _belgeleri_ac(dosyalar, sifre_sor)
+    if acik is None:
+        return False
+    if WINDOWS:
+        _yazdir_win(acik, yazici, kagit_kodu, yon, kopya, dm, cikti, ilerleme)
+    else:
+        _yazdir_lp(acik, yazici, kagit_kodu, yon, kopya, cikti, ilerleme)
+    return True
+
+
+def _yazdir_win(acik, yazici, kagit_kodu, yon, kopya, dm, cikti, ilerleme):
     belgeler = []
     try:
-        for dosya in dosyalar:
-            try:
-                sifre = None
-                reader = PdfReader(dosya)
-                if reader.is_encrypted and not reader.decrypt(""):
-                    sifre = sifre_sor(os.path.basename(dosya))
-                    if sifre is None:
-                        return False
-                    if not reader.decrypt(sifre):
-                        raise ValueError("Şifre yanlış.")
-                belgeler.append(pdfium.PdfDocument(dosya, password=sifre))
-            except Exception as e:
-                raise RuntimeError(f"{os.path.basename(dosya)}:\n{e}") from e
-
+        for dosya, sifre, _ in acik:
+            belgeler.append(pdfium.PdfDocument(dosya, password=sifre))
         dm = dm or yazici_ayarlari(yazici)
         dm.PaperSize = kagit_kodu
         dm.Copies = 1  # kopyaları kendimiz döngüyle basarız: harmanlanmış (1-2-3, 1-2-3)
@@ -288,10 +314,75 @@ def yazdir(dosyalar, yazici, kagit_kodu, yon, kopya, sifre_sor, dm=None, cikti=N
             raise
         finally:
             win32gui.DeleteDC(hdc)
-        return True
     finally:
         for belge in belgeler:
             belge.close()
+
+
+# ---- macOS / Linux: CUPS (lpstat, lpoptions, lp) ----
+
+KAGIT_BOYUTLARI = {"A4": (595, 842), "A3": (842, 1191), "A5": (420, 595), "Letter": (612, 792), "Legal": (612, 1008)}
+
+
+def _komut(*args):
+    try:
+        return subprocess.run(args, capture_output=True, text=True).stdout
+    except OSError:  # CUPS kurulu değil
+        return ""
+
+
+def _lp_kagitlari(yazici):
+    """(yazıcının desteklediği bilinen kağıtlar, varsayılan kağıt)"""
+    satir = re.search(r"^PageSize/[^:]*:(.*)$", _komut("lpoptions", "-p", yazici, "-l"), re.M)
+    secenekler = satir.group(1).split() if satir else []
+    varsayilan = next((s[1:] for s in secenekler if s.startswith("*")), None)
+    adlar = {s.lstrip("*") for s in secenekler}
+    # ponytail: yalnızca bilinen 5 boyut; sürücü listesi okunamazsa hepsi sunulur
+    bilinen = [a for a in KAGIT_BOYUTLARI if a in adlar] or list(KAGIT_BOYUTLARI)
+    return bilinen, varsayilan if varsayilan in bilinen else None
+
+
+if not WINDOWS:
+    def yazicilar():
+        adlar = _komut("lpstat", "-e").split()
+        m = re.search(r":\s*(\S+)\s*$", _komut("lpstat", "-d"))  # "system default destination: X"
+        return adlar, m.group(1) if m else (adlar[0] if adlar else "")
+
+    def kagitlar(yazici):
+        return {a: a for a in _lp_kagitlari(yazici)[0]}
+
+    def yazici_ayarlari(yazici):
+        return SimpleNamespace(PaperSize=_lp_kagitlari(yazici)[1])
+
+
+def _yazdir_lp(acik, yazici, kagit, yon, kopya, cikti, ilerleme):
+    """Sayfaları kağıda sığdırılmış tek PDF'te toplar, lp ile gönderir; kopyaları CUPS harmanlar."""
+    dw, dh = KAGIT_BOYUTLARI[kagit]
+    w_ = PdfWriter()
+    for sira, (_, _, reader) in enumerate(acik):
+        for i, sayfa in enumerate(reader.pages, start=1):
+            sayfa.transfer_rotation_to_content()
+            kutu = sayfa.mediabox
+            w, h = float(kutu.width), float(kutu.height)
+            yatay = w > h if yon == "oto" else yon == "yatay"
+            pw, ph = (dh, dw) if yatay else (dw, dh)
+            olcek = min(pw / w, ph / h)
+            yeni = w_.add_blank_page(pw, ph)
+            yeni.merge_transformed_page(sayfa, Transformation()
+                                        .translate(-float(kutu.left), -float(kutu.bottom)).scale(olcek)
+                                        .translate((pw - w * olcek) / 2, (ph - h * olcek) / 2))
+            if ilerleme:
+                ilerleme(sira, i * 100 // len(reader.pages))
+    if cikti:
+        w_.write(cikti)
+        return
+    with tempfile.TemporaryDirectory() as d:
+        yol = os.path.join(d, "baski.pdf")
+        w_.write(yol)
+        sonuc = subprocess.run(["lp", "-d", yazici, "-n", str(kopya), "-o", "collate=true", "-o", f"media={kagit}",
+                                "-t", "PDF Birleştirici", yol], capture_output=True, text=True)
+    if sonuc.returncode:
+        raise RuntimeError(sonuc.stderr.strip() or "lp başarısız oldu.")
 
 
 # ---------------- Arayüz ----------------
@@ -302,7 +393,7 @@ secilen_dosyalar = []
 IKON_AY = "iVBORw0KGgoAAAANSUhEUgAAABQAAAAUCAYAAACNiR0NAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAIASURBVDhP1ZMxiBNREIb/fzckVxzJFRe43UxYixQHXpFCEEHhCgsrvUY5sbC9IgcKNlae2NopWHpiccUJh5WFCBYpRC0sUgS8Juw+ImphkiuEZBkLd8PmZaOtfs3Om/nfz7x984B/HdoJGxFpqGoTgBhjHgOY2Josjp1IEZGWiHwD8JnkIcnC38yQ12EQBGtxHB8A2FTVLyTXVLVtjLlga/OY6zBjdh/AbpJ+Y8kWMmMoIq3E7K4xZi9TOs7Ef8Tu8J6qHhtjHgIAyW7yPW3pFjI1FJEGgFWSz9KfH0VRB8AJgO1qtbo8s3MBU8NkNKCq3ayA5C6AU8Vi8Xmeab1eP+/7/k66zh55KRNPCcNwH8ALklulUumDiLR8378oItsi8kRVX5FcSfVTQ5KfkvBsmkuJouhqcuMC4JHjOK8BHADYAbCsqp1UOzOHIjJS1a4x5lzeEHuet0qySXKDZEFVb5LciOO42u/3v9t61Gq1PRFREblj12xE5FKifZrNu9nFaDRql8vly6p6rVKpDIbD4ftsPaVWq22SPALw1XXdK4PB4Gdam3t6nuetu657BGAdwFtVfek4zsc4jk9INgDcILkFICJ5PQzDdnb/nCF+v+elyWTygOQtAAW7DmDfdd3bvV7vh13INUwJgmBlPB6fcRynqaoFVe2o6rvcC/hv+AX5irReBXuLZAAAAABJRU5ErkJggg=="
 IKON_GUNES = "iVBORw0KGgoAAAANSUhEUgAAABQAAAAUCAYAAACNiR0NAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAIFSURBVDhPpZSxixNBFMbf25liCWmFFE6S4oQrUlhc4ITYeb1CLAT/hCvOv8HCwiKFhaXlFSdoaXdCGiFXXGe6Yd6bFNsJSXGw7j6L7IbJ3EZW/MHC7rfzfcy8t28BWmCt7THzw1hvIomFJpRSlwAwj/UmWgX+C3uBIqKdcxciokP9EER0nmVZN9T2AonoPEmS2Wq1ugxDkyR5AwCvwrXe+xkifsjz/G2o7yEi2nt/RUS5c25S69baNNyJ9/4xEeXMPI93eI/q2BPYBh0T0XVlFmZeMPMpAIBz7llTGMZCjbX2WCm1QMQuANwAwB0ATETkNyKeGWO+xx6IaxiilPqIiF0ReWGMGRtjngLAk+r1p2j5DrTW9qrvDKBqQJ7nS6XUGhFvjTHj0MDMXwDguYg8KopiE3sTrbVGxGF9iUja6XQ0ImoA+BWGwbbGm+o2bfIerCEzLwDgpCzL8WAwuIFtXYda658isun3+w9iD/ytKcx8KiJz2B7la1mWd4g4BYC0KIqXw+Hwc+yBQ00hoiNjzA9EPENELyJTRHwtIps6jIhGrSbKez8jorVz7qTWiOiIiEbB84iI1t77qzj03uiJyAUi3qZpuqz1oig2iLhrkDFmmSTJNxGZeu/f7QJisizreu9n8QQQ0TUz21ATEc3M7621vVBvRVPgIRqb8j+0Cmz6fR3iDzpFIhsrF0n1AAAAAElFTkSuQmCC"
 
-TEMA_DOSYASI = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "PDF Birlestirici", "tema.txt")
+TEMA_DOSYASI = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~/.config"), "PDF Birlestirici", "tema.txt")
 
 
 def _baslangic_temasi():
@@ -568,7 +659,8 @@ def yazdir_penceresi():
             kagidi_sec(dm.PaperSize)
 
     cb_yazici.bind("<<ComboboxSelected>>", yazici_degisti)
-    ttk.Button(govde, text="Ayarlar…", command=ayarlar).grid(row=1, column=2, padx=(8, 0), pady=4)
+    if WINDOWS:  # sürücü ayar penceresi yalnızca Windows'ta var
+        ttk.Button(govde, text="Ayarlar…", command=ayarlar).grid(row=1, column=2, padx=(8, 0), pady=4)
 
     ttk.Label(govde, text="Yön").grid(row=3, column=0, sticky="w", pady=4)
     yonler = ttk.Frame(govde)
@@ -752,6 +844,7 @@ if __name__ == "__main__":
     kaydir.grid(row=0, column=1, sticky="ns")
     tablo.config(yscrollcommand=kaydir.set)
     tablo.bind("<Delete>", lambda e: secileni_sil())
+    tablo.bind("<BackSpace>", lambda e: secileni_sil())  # Mac klavyesinde "delete" tuşu
     tablo.bind("<<TreeviewSelect>>", lambda e: _yenile())
 
     bos_ipucu = ttk.Label(frame_liste, text="Henüz PDF eklenmedi\n\"PDF Ekle\" ile başlayın",

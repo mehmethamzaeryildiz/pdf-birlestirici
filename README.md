@@ -29,6 +29,18 @@ Uygulamanın en son kararlı sürümünü bilgisayarınıza indirerek doğrudan 
 >
 > Kaldırmak için: Ayarlar → Uygulamalar → PDF Birleştirici → Kaldır (veya Denetim Masası → Programlar ve Özellikler).
 
+### macOS
+
+1. Releases sayfasından Mac'inize uygun dosyayı indirin: **`PDF_Birlestirici-macOS-AppleSilicon.zip`** (M1/M2/M3/M4) veya **`PDF_Birlestirici-macOS-Intel.zip`** (Intel). Hangisi olduğunu  → Bu Mac Hakkında'dan görebilirsiniz.
+2. Zip'i açın, **PDF Birlestirici** uygulamasını **Uygulamalar** klasörüne sürükleyin.
+3. İlk açılışta "doğrulanamadı" uyarısı çıkarsa (uygulama Apple tarafından imzalanmadı): **Sistem Ayarları → Gizlilik ve Güvenlik** → en altta **"Yine de Aç"**. Alternatif: Terminal'de `xattr -cr "/Applications/PDF Birlestirici.app"`.
+
+### Linux
+
+`PDF_Birlestirici-Linux.tar.gz` dosyasını indirip açın, `PDF Birlestirici/PDF Birlestirici` dosyasını çalıştırın.
+
+> macOS/Linux'ta yazdırma sistemin yazıcıları (CUPS) üzerinden yapılır; yazıcının sürücü ayar penceresi ("Ayarlar…") yalnızca Windows'ta vardır.
+
 ---
 
 ## 🛠 Kaynaktan Çalıştırma
@@ -41,6 +53,8 @@ python pdf_birlestirici.py
 ```
 
 Test: `python test_birlestir.py` (çıktı `OK` olmalı)
+
+macOS ve Linux paketleri GitHub Actions ile otomatik derlenir (`.github/workflows/build.yml`): Releases'ta bir sürüm yayınlandığında dosyalar o sürüme eklenir; Actions sekmesinden elle de çalıştırılabilir.
 
 ### Kurulum dosyası (setup) üretme
 
